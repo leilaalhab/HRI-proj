@@ -98,7 +98,10 @@ def _draw_scene_base(ax, targets):
 
 
 def plot_scene_trajectory(targets: list, observations: list, ground_truth_target,
-                          save_path: str) -> None:
+                          save_path: str,
+                          predicted_trajectory: list = None,
+                          xf_predicted: np.ndarray = None,
+                          lock_time: float = None) -> None:
     fig, (ax_scene, ax_vel) = plt.subplots(1, 2, figsize=(14, 6))
 
     # --- Left: spatial trajectory ---
@@ -113,7 +116,28 @@ def plot_scene_trajectory(targets: list, observations: list, ground_truth_target
                   markersize=5, alpha=0.6, zorder=4)
     ax_scene.plot(xs[-1], ys[-1], "x", color=ground_truth_target.color_rgb,
                   markersize=14, markeredgewidth=3,
-                  label=f"Endpoint ({ground_truth_target.name})", zorder=6)
+                  label=f"Actual endpoint ({ground_truth_target.name})", zorder=6)
+
+    # Predicted trajectory (dashed, drawn from lock point onward)
+    if predicted_trajectory is not None and len(predicted_trajectory) > 1:
+        pxs = [p[0] for p in predicted_trajectory]
+        pys = [p[1] for p in predicted_trajectory]
+        ax_scene.plot(pxs, pys, "--", color="#888888",
+                      linewidth=2, label="Predicted trajectory", zorder=3)
+
+    # Predicted endpoint star
+    if xf_predicted is not None:
+        ax_scene.plot(xf_predicted[0], xf_predicted[1], "*",
+                      color="#333333", markersize=18,
+                      label="xf_predicted", zorder=7)
+
+    # Lock point marker
+    if lock_time is not None:
+        lock_obs = next((o for o in observations if o.timestamp >= lock_time), None)
+        if lock_obs is not None:
+            ax_scene.plot(lock_obs.position[0], lock_obs.position[1],
+                          "D", color="#FFaa00", markersize=10,
+                          label=f"Lock point  (t={lock_time:.2f}s)", zorder=8)
 
     ax_scene.set_xlim(0, CANVAS_W)
     ax_scene.set_ylim(0, CANVAS_H)
@@ -121,7 +145,7 @@ def plot_scene_trajectory(targets: list, observations: list, ground_truth_target
     ax_scene.set_aspect("equal")
     ax_scene.set_xlabel("X (pixels)")
     ax_scene.set_ylabel("Y (pixels)")
-    ax_scene.set_title(f"Simulated Hand Trajectory → {ground_truth_target.label}",
+    ax_scene.set_title(f"Hand Trajectory + Prediction → {ground_truth_target.label}",
                        fontsize=13)
     ax_scene.legend(loc="lower right", fontsize=9)
     ax_scene.grid(True, linestyle="--", alpha=0.4)
@@ -135,7 +159,10 @@ def plot_scene_trajectory(targets: list, observations: list, ground_truth_target
     ax_vel.plot(timestamps, speeds, ".", color=ground_truth_target.color_rgb,
                 markersize=6)
 
-    # Mark peak speed
+    if lock_time is not None:
+        ax_vel.axvline(x=lock_time, color="#FFaa00", linestyle="--",
+                       linewidth=1.5, label=f"Lock  (t={lock_time:.2f}s)")
+
     peak_idx = int(np.argmax(speeds))
     ax_vel.annotate(
         f"Peak\n{speeds[peak_idx]:.1f} px/s",
