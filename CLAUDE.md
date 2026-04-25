@@ -508,20 +508,23 @@ Acceptance criteria:
 
 ### Stage 6: Virtual Robot Action
 
-Goal: visualize proactive robot behavior.
+Goal: visualize proactive robot behavior using a PyBullet-simulated robot arm.
 
 Tasks:
 
-- Add a simple virtual robot base and gripper marker.
-- After target lock, move the gripper toward `xf_predicted`.
-- Use smooth movement for robot action.
-- Save a clear final plot or animation.
+- Set up a PyBullet simulation with a simple robot arm (URDF or programmatically defined).
+- After target lock, compute inverse kinematics to position the end effector at `xf_predicted`.
+- Command the robot arm to move smoothly to the computed joint configuration.
+- Render the PyBullet simulation alongside the main demo (separate window or composited into the OpenCV frame).
+- Use minimum-jerk joint interpolation for smooth arm movement after lock.
+- Save a clear final plot or animation showing the robot response.
 
 Acceptance criteria:
 
-- The robot response is visible.
-- The robot begins after target lock, not only after the hand fully stops.
-- The plot/animation is understandable for presentation.
+- A PyBullet simulation window shows the robot arm responding after target lock.
+- The robot begins moving after target lock, not only after the hand fully stops.
+- Inverse kinematics positions the end effector at or near `xf_predicted`.
+- The robot response is understandable for the video and interview.
 
 ### Stage 7: Feedback, Adaptation, and Trial Logging
 
