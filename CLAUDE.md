@@ -150,13 +150,16 @@ Use **only the Python implementation path**.
 Recommended libraries:
 
 - `numpy` for math and arrays
-- `opencv-python` for webcam capture, drawing, and display windows
+- `opencv-python` for webcam capture and frame processing
 - `mediapipe` for webcam hand/wrist/fingertip tracking
-- `matplotlib` for saved plots and optional offline figures
+- `matplotlib` for saved offline figures and plots
 - `pandas` for saving trial logs
 - `pytest` for lightweight tests
+- `pybullet` for physics-based robot arm simulation and inverse kinematics
+- `flask` for the browser-based GUI server (MJPEG stream endpoint)
+- `pillow` for JPEG frame encoding in the MJPEG stream
 
-Do not create a Unity version. Do not create a web/JavaScript version. Do not mention or implement an AR version. Keep the whole project understandable as a Python course demo.
+Do not create a Unity version. Do not create an AR version. Keep the whole project understandable as a Python course demo. The browser GUI uses plain Flask with a single HTML page — no JavaScript framework, no frontend build step.
 
 ---
 
@@ -196,20 +199,26 @@ project-root/
 │   │
 │   ├── robot/
 │   │   ├── __init__.py
-│   │   └── virtual_robot.py
+│   │   └── pybullet_robot.py      ← PyBullet arm setup, IK, joint stepping
+│   │
+│   ├── server/
+│   │   ├── __init__.py
+│   │   └── stream_server.py       ← Flask MJPEG server, composite frame builder
 │   │
 │   ├── visualization/
 │   │   ├── __init__.py
-│   │   ├── live_dashboard.py
-│   │   └── plots.py
+│   │   └── plots.py               ← offline matplotlib figures only
 │   │
 │   └── evaluation/
 │       ├── __init__.py
 │       └── metrics.py
 │
+├── static/
+│   └── index.html                 ← single-page browser UI (one <img> tag)
+│
 ├── experiments/
 │   ├── run_simulation.py
-│   ├── run_webcam_demo.py
+│   ├── run_webcam_demo.py         ← starts Flask server; user opens localhost:5000
 │   └── run_trials.py
 │
 ├── results/
@@ -236,7 +245,7 @@ This structure is a guide, not a strict interface contract. Keep modules separat
 - Keep simulation only as an early debugging tool and fallback for testing.
 - Keep the math visible and explainable.
 - Keep webcam perception and simulated perception separate.
-- Do not over-engineer the robot. Use a virtual robot marker, gripper icon, or simple arm line.
+- The robot is simulated with PyBullet. Keep the arm model simple (2-DOF or 3-DOF planar). Do not implement full dynamics or collision — kinematics and IK are enough.
 - Keep configuration values in `config.py`.
 - Save generated plots, screenshots, logs, and optional animations in `results/`.
 - Use readable names such as `posterior`, `goal`, `observation`, `target`, `trajectory`, `xf_predicted`, `xf_actual`, `D`, `tau`, and `prediction_error`.
@@ -247,30 +256,69 @@ This structure is a guide, not a strict interface contract. Keep modules separat
 
 ---
 
-## 6. Simple GUI / Visualization Decisions
+## 6. GUI and Visualization Decisions
 
-Start with simple visual output, then build a clean webcam demo dashboard.
+### 6.1 Browser-Based Real-Time Display (Stage 8 onward)
 
-Recommended GUI decisions:
+The live demo is served through a **Flask web server** and viewed in a browser at `localhost:5000`. There is no OpenCV display window in the final demo. The browser shows a single composite image streamed as an **MJPEG feed**.
 
-- Use an OpenCV live window for the main real-time demo.
-- Draw the webcam feed as the background.
-- Overlay the tracked wrist/fingertip position.
-- Draw three target regions for red, blue, and green.
-- Draw live probability bars for the three targets on one side of the frame.
-- Display status text: current mode, locked target, confidence, lock time, estimated `D`, and prediction error.
-- Use consistent colors: red target is red, blue target is blue, green target is green.
-- Use simple symbols:
-  - circle for the detected hand/wrist/fingertip
-  - square/rectangle for target regions
-  - star/cross for `xf_predicted`
-  - dashed or lighter path for predicted trajectory if easy to draw
-  - solid path for observed trajectory
-  - arrow/line for virtual robot action
-- Keep labels large enough to be visible in the project video.
-- Avoid clutter. The viewer should immediately understand: hand moves, probabilities change, target locks, robot reacts.
-- Save screenshots from the live demo for the report.
-- Use `matplotlib` only for offline plots such as probability history, prediction error, and summary metrics.
+**Composite image layout (assembled server-side as a numpy array):**
+
+```
+┌─────────────────────────────────┬──────────────────┐
+│                                 │                  │
+│   Webcam feed (640×480)         │  PyBullet robot  │
+│   + hand circle overlay         │  arm render      │
+│   + target region boxes         │  (400×400)       │
+│   + predicted trajectory        │                  │
+│   + xf_predicted star           ├──────────────────┤
+│   + status text overlay         │  Probability     │
+│                                 │  bars panel      │
+│                                 │  (R / B / G)     │
+└─────────────────────────────────┴──────────────────┘
+```
+
+**MJPEG streaming architecture:**
+
+- Flask serves `GET /video_feed` with `Content-Type: multipart/x-mixed-replace`
+- Each frame is JPEG-encoded with Pillow and pushed as a multipart boundary
+- The browser displays it via a plain `<img src="/video_feed">` tag — no JavaScript needed
+- `static/index.html` contains only this one tag plus minimal CSS for layout
+
+**Threading model — four concurrent threads:**
+
+| Thread | Responsibility |
+|--------|---------------|
+| Webcam thread | Captures frames, runs MediaPipe, smooths position, estimates velocity |
+| PyBullet thread | Steps the physics simulation, updates joint positions toward IK target |
+| Inference thread | Runs Bayesian update and prediction on each new observation |
+| Flask thread | Composites the latest frame + robot render + bars, serves MJPEG |
+
+A `threading.Lock` protects the shared composite frame buffer. Each thread writes its output to a shared state object; the Flask thread reads from it to build each MJPEG frame.
+
+**Overlay conventions (drawn on composite numpy array with OpenCV):**
+
+- Circle: detected hand/wrist/fingertip position
+- Rectangles: red, blue, green target regions in their respective colours
+- Star (`*`): `xf_predicted` marker
+- Dashed line: predicted remaining hand trajectory
+- Status text (top-left): mode, locked target, confidence, lock time, estimated D, prediction error
+- Probability bars (right panel): filled rectangles scaled by posterior value, one per target in target colour
+
+**Screenshots for the report:**
+- Save the full browser composite frame (not just the webcam crop) using `cv2.imwrite` on the shared numpy array
+- Save key frames: at lock moment, at hand final stop, after robot settled
+
+### 6.2 Offline Figures (matplotlib only)
+
+Use `matplotlib` only for saved figures — never for the live demo:
+
+- `results/figures/static_scene.png`
+- `results/figures/scene_trajectory.png`
+- `results/figures/posterior_probabilities.png`
+- `results/figures/interception_prediction.png`
+- `results/figures/prediction_error.png`
+- `results/figures/summary_metrics.png`
 
 ---
 
@@ -342,50 +390,86 @@ At every time step:
 4. Store the posterior history.
 5. Lock the target when the maximum posterior is greater than `0.8`.
 
-Use simple cues:
+Use two complementary cues:
 
-- distance from hand to goal
-- direction of velocity toward goal
-
-A good simple likelihood is:
+- **Off-axis distance** — how far the hand's current position deviates from the straight-line path between `HAND_START` and goal G
+- **Direction** — cosine similarity between the hand's velocity vector and the direction toward goal G
 
 ```text
-likelihood = distance_likelihood * direction_likelihood
+likelihood = off_axis_likelihood * direction_likelihood
 ```
 
 where:
 
 ```text
-distance_likelihood = exp(-distance / distance_scale)
-direction_likelihood = exp(direction_weight * cosine_similarity)
+off_axis_distance    = perpendicular distance from hand to the START→G line
+off_axis_likelihood  = exp(-off_axis_normalized / DISTANCE_SCALE)
+
+direction_likelihood = exp(DIRECTION_WEIGHT * cosine_similarity(velocity, direction_to_G))
 ```
 
-The exact implementation can evolve naturally, but it must remain easy to explain in the interview.
+Coordinates are normalized to [0, 1] before distance computation so `DISTANCE_SCALE` is dimensionless. Use `DISTANCE_SCALE = 0.15` (a 15%-of-canvas deviation gives likelihood ≈ 0.37). Set `direction_likelihood = 1.0` (neutral) when speed is below 5 px/s.
+
+**Why off-axis instead of raw distance to goal:** raw distance only becomes informative when the hand is nearly at the goal. Off-axis distance discriminates from the first frame of movement — a hand moving toward green immediately has near-zero off-axis deviation for the green path and large deviation for red and blue paths.
+
+The implementation must remain easy to explain in the interview.
 
 ### 7.5 Minimum-Jerk Prediction
 
 Use the minimum-jerk equation to generate smooth movement from the current hand/robot position to the predicted final point.
 
-For the first working version:
+**`xf_predicted`:** set to `locked_target.position` (the centre of the locked target region). Simple, defensible, and correct when the hand heads directly toward the target centre.
 
-- After target lock, set `xf_predicted` near the locked target position or target region center.
-- Estimate duration `D` from remaining distance and current hand speed.
-- Generate a smooth predicted trajectory using the minimum-jerk profile.
+**D estimation using tau back-calculation:**
 
-Later, improve this by fitting recent observations if needed. Keep the final explanation simple.
+Naive `D = remaining_distance / current_speed` fails badly when the lock happens early (the hand is slow at the start of minimum-jerk motion and the estimate can be 4–5× too large). Instead:
 
-### 7.6 Virtual Robot Action
+1. Compute `progress = |x_current − x0| / |xf − x0|`
+2. Solve `s(τ) = progress` for τ, where `s(τ) = 10τ³ − 15τ⁴ + 6τ⁵` (polynomial root via `np.roots`)
+3. Evaluate the normalized speed profile: `g(τ) = 30τ² − 60τ³ + 30τ⁴`
+4. Back-calculate total duration: `D_total = total_dist * g(τ) / current_speed`
+5. Remaining duration: `D_remaining = D_total * (1 − τ)`
 
-The virtual robot does not need physical robot kinematics.
+This uses the minimum-jerk model to figure out where in the movement we are, then derives remaining time from that. Falls back to `remaining_dist / 60.0` when speed < 5 px/s.
 
-A good first version is:
+**Robot arm duration:** `D_robot = D_remaining × ROBOT_D_SCALE` (default 0.85) so the arm arrives slightly before the hand, making proactiveness visible.
 
-- a fixed robot base point drawn in the window
-- a moving gripper marker
-- a line or arrow from the robot base to the predicted interception point
-- smooth movement after target lock
+The prediction module (`src/prediction/minimum_jerk.py`) is shared by both simulation (trajectory generation) and webcam demo (real-time prediction). No duplication of the formula.
 
-The action should visually show that the robot reacts before the human fully reaches the object.
+### 7.6 Robot Action (PyBullet)
+
+The robot is simulated using **PyBullet** in `DIRECT` mode (no PyBullet GUI window — rendering is done via `getCameraImage`).
+
+**Arm model:** a simple 2-DOF or 3-DOF planar revolute-joint arm defined programmatically or loaded from a minimal URDF. Keep it simple enough to explain the kinematics in the viva.
+
+**Robot base position:** placed at the lower-right area of the scene (e.g. pixel coords `(600, 380)`) so the arm sweeps upward and leftward toward whichever target is locked. This creates a clear visual of the robot reaching across the workspace.
+
+**Workflow after target lock:**
+
+1. Convert `xf_predicted` (pixel coords) to PyBullet world coordinates.
+2. Call PyBullet IK (`calculateInverseKinematics`) to get joint angles for that end-effector position.
+3. Interpolate from current joint angles to target joint angles using a minimum-jerk profile over `D_robot` seconds.
+4. Step the simulation at each frame, updating joint positions.
+
+**Rendering and compositing:**
+
+```python
+width, height, rgba, depth, seg = pybullet.getCameraImage(
+    width=PYBULLET_RENDER_W,
+    height=PYBULLET_RENDER_H,
+    renderer=pybullet.ER_TINY_RENDERER,
+)
+robot_frame = np.array(rgba, dtype=np.uint8)[:, :, :3]  # drop alpha
+```
+
+This numpy array is composited into the right panel of the browser frame.
+
+**State machine:**
+- `IDLE`: before lock, arm rests at home position
+- `MOVING`: after lock, arm interpolates to IK solution over `D_robot` seconds
+- `HOLDING`: arm held at target, waiting for trial reset
+
+The action must visually demonstrate that the robot starts moving **before** the hand fully reaches the object — this is the core proactiveness claim of the project.
 
 ### 7.7 Feedback and Adaptation
 
@@ -425,11 +509,15 @@ CONFIDENCE_THRESHOLD = 0.8
 NUM_OBJECTS = 3
 RANDOM_SEED = 42
 SIMULATION_DT = 0.05
-DISTANCE_SCALE = 1.0
+DISTANCE_SCALE = 0.15      # normalized [0,1]; 15% off-axis deviation → likelihood ≈ 0.37
 DIRECTION_WEIGHT = 2.0
 ADAPTATION_GAIN = 0.1
 WEBCAM_INDEX = 0
 SMOOTHING_ALPHA = 0.35
+FLASK_PORT = 5000
+PYBULLET_RENDER_W = 400    # width of PyBullet camera render in pixels
+PYBULLET_RENDER_H = 400    # height of PyBullet camera render in pixels
+ROBOT_D_SCALE = 0.85       # robot arm arrives at D_remaining * ROBOT_D_SCALE seconds
 ```
 
 Acceptance criteria:
@@ -506,25 +594,32 @@ Acceptance criteria:
 - The predicted endpoint is shown in the scene.
 - The predicted trajectory is visually distinct from the observed trajectory.
 
-### Stage 6: Virtual Robot Action
+### Stage 6: PyBullet Robot Action + Browser Composite
 
-Goal: visualize proactive robot behavior using a PyBullet-simulated robot arm.
+Goal: simulate a robot arm with PyBullet, composite its render into a browser-served MJPEG stream alongside the main scene, and demonstrate proactive robot response.
 
 Tasks:
 
-- Set up a PyBullet simulation with a simple robot arm (URDF or programmatically defined).
-- After target lock, compute inverse kinematics to position the end effector at `xf_predicted`.
-- Command the robot arm to move smoothly to the computed joint configuration.
-- Render the PyBullet simulation alongside the main demo (separate window or composited into the OpenCV frame).
-- Use minimum-jerk joint interpolation for smooth arm movement after lock.
-- Save a clear final plot or animation showing the robot response.
+- Create `src/robot/pybullet_robot.py`:
+  - Launch PyBullet in `DIRECT` mode (no PyBullet GUI window).
+  - Define a simple 2-DOF or 3-DOF planar revolute arm programmatically or from a minimal URDF.
+  - Implement `activate(xf_predicted, D_robot)` — computes IK target joint angles.
+  - Implement `step(dt)` — advances joint positions toward target using minimum-jerk interpolation.
+  - Implement `render()` — calls `pybullet.getCameraImage()` and returns an RGB numpy array.
+- Create `src/server/stream_server.py`:
+  - Flask app with a single `/video_feed` MJPEG endpoint.
+  - Composite thread: combines scene frame + PyBullet render + probability bars into one numpy array.
+  - Serves `static/index.html` at `/`.
+  - Uses `threading.Lock` to protect the shared composite frame.
+- Create `static/index.html` — one `<img src="/video_feed">` tag.
+- Update `experiments/run_simulation.py` to activate the robot after lock and save the static interception figure.
 
 Acceptance criteria:
 
-- A PyBullet simulation window shows the robot arm responding after target lock.
-- The robot begins moving after target lock, not only after the hand fully stops.
-- Inverse kinematics positions the end effector at or near `xf_predicted`.
-- The robot response is understandable for the video and interview.
+- Running `python experiments/run_simulation.py` saves `results/figures/interception_prediction.png` showing the robot arm at `xf_predicted`.
+- The robot arm is positioned by IK, not manually placed.
+- The arm starts moving after target lock, not after the hand stops.
+- PyBullet render is a proper camera image, not a matplotlib line drawing.
 
 ### Stage 7: Feedback, Adaptation, and Trial Logging
 
@@ -545,27 +640,41 @@ Acceptance criteria:
 - Error values are printed.
 - Adaptation values change across trials.
 
-### Stage 8: Webcam Perception Integration
+### Stage 8: Webcam Perception Integration + Live Browser Demo
 
-Goal: make the project a real-time perception project.
+Goal: make the project a real-time perception project with a single browser window showing the full HRI loop.
 
 Tasks:
 
-- Add webcam frame capture.
-- Add hand/wrist/fingertip tracking.
-- Convert tracked image coordinates into scene coordinates.
-- Estimate velocity from recent webcam positions.
-- Feed the live observation stream into Bayesian inference.
-- Overlay targets, probabilities, target lock, prediction, and robot response on the live frame.
+- Create `src/perception/webcam_perception.py`:
+  - Capture frames with OpenCV (`VideoCapture`).
+  - Run MediaPipe Hands to extract wrist/fingertip pixel position.
+  - Apply exponential smoothing (`SMOOTHING_ALPHA`) to position.
+  - Estimate velocity from last two positions and timestamps.
+  - Package as an observation compatible with `BayesianGoalInference.update()`.
+- Wire the four threads in `experiments/run_webcam_demo.py`:
+  1. **Webcam thread** — captures frames, runs MediaPipe, pushes observations to a queue.
+  2. **Inference + PyBullet thread** — consumes observations, updates posteriors, runs prediction after lock, steps PyBullet arm.
+  3. **Composite thread** — builds the browser frame (webcam + overlays + PyBullet render + probability bars) and writes to shared buffer.
+  4. **Flask thread** — serves MJPEG from shared buffer.
+- Draw overlays on the webcam frame (OpenCV):
+  - Circle at hand position
+  - Target region rectangles (red, blue, green)
+  - Predicted trajectory (dashed line after lock)
+  - `xf_predicted` star marker
+  - Status text: mode, locked target, confidence, lock time, D estimate, prediction error
+- Composite the PyBullet render (right panel) and probability bars alongside the webcam frame.
+- Handle graceful cases: no hand detected, tracking loss, trial reset (`r` key), screenshot save (`s` key), quit (`q` key).
 
 Acceptance criteria:
 
-- `python experiments/run_webcam_demo.py` opens the webcam demo.
-- The webcam hand/wrist/fingertip position is visible.
-- Target probabilities change in real time.
-- A target locks when a probability passes `0.8`.
-- The virtual robot response is shown after target lock.
-- The demo can reset trials and save logs/screenshots.
+- `python experiments/run_webcam_demo.py` starts the Flask server and prints `→ Open http://localhost:5000 in your browser`.
+- Opening that URL shows the full composite: webcam feed + PyBullet arm + probability bars in one window.
+- The tracked hand position updates in real time.
+- Target probabilities change visibly as the hand moves.
+- A target locks when a probability passes `0.8` — shown in the status overlay.
+- The PyBullet arm begins moving after target lock, before the hand stops.
+- Pressing `r` resets the trial. Pressing `s` saves a screenshot. Pressing `q` shuts down cleanly.
 
 ### Stage 9: Multiple Real-Time Trials and Summary Results
 
@@ -681,16 +790,16 @@ By the final stage, the project should generate some or all of these:
 results/figures/static_scene.png
 results/figures/scene_trajectory.png
 results/figures/posterior_probabilities.png
-results/figures/interception_prediction.png
+results/figures/interception_prediction.png       ← includes PyBullet arm render
 results/figures/prediction_error.png
 results/figures/summary_metrics.png
-results/screenshots/webcam_demo_lock.png
-results/screenshots/webcam_demo_final.png
-results/animations/hri_loop_animation.gif
+results/screenshots/browser_demo_lock.png         ← full browser composite at lock moment
+results/screenshots/browser_demo_final.png        ← full browser composite at trial end
+results/animations/hri_loop_animation.gif         ← optional
 results/logs/trials.csv
 ```
 
-The animation is optional, but webcam screenshots, figures, and logs should exist.
+Screenshots must capture the full browser composite frame (webcam + PyBullet + bars), not just the webcam crop. Webcam screenshots and trial logs are required; the animation is optional.
 
 ---
 
@@ -715,8 +824,15 @@ Include simple commands such as:
 
 ```bash
 pip install -r requirements.txt
+
+# Live webcam demo (opens browser at localhost:5000)
 python experiments/run_webcam_demo.py
+# then open http://localhost:5000 in your browser
+
+# Simulation / debug mode (no webcam needed)
 python experiments/run_simulation.py
+
+# Multi-trial evaluation runner
 python experiments/run_trials.py
 ```
 
@@ -732,7 +848,7 @@ The project is complete when:
 - The system continuously updates Bayesian probabilities for red, blue, and green targets.
 - The target locks when `P(G | O) > 0.8`.
 - The system predicts an interception/final point using the minimum-jerk model.
-- A virtual robot/gripper/marker reacts proactively after target lock.
+- A PyBullet-simulated robot arm reacts proactively after target lock, positioned by inverse kinematics.
 - The system computes and logs prediction error.
 - The system runs multiple real-time trials and reports accuracy, prediction error, and lock time.
 - The project saves clean webcam screenshots, figures, and logs for presentation.
@@ -748,11 +864,11 @@ The project is complete when:
 - Do not skip Bayesian normalization.
 - Do not hard-code only one object.
 - Do not hide the assignment equations from the final code/report.
-- Do not overcomplicate the robot model.
-- Do not mix all logic into one giant script.
-- Do not make plots or overlays unreadable with too many lines or labels.
-- Do not claim physical robot control; this is a visualization/demo unless real hardware is explicitly added later.
-- Do not rely on advanced tools without being able to explain them in the viva.
+- Do not over-complicate the PyBullet arm. A 2-DOF planar arm is sufficient and fully explainable.
+- Do not mix all logic into one giant script. Keep webcam, inference, robot, and server threads in separate modules.
+- Do not make overlays unreadable with too many lines or labels.
+- Do not forget thread safety. Always use `threading.Lock` when writing or reading the shared composite frame buffer.
+- Do not rely on advanced tools without being able to explain them in the viva. Be ready to explain PyBullet IK, the MJPEG stream, and the threading model.
 
 ---
 
