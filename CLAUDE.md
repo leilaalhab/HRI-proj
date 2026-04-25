@@ -14,6 +14,8 @@ The final project should match the assignment concept:
 
 Do not implement everything at once. Build from a minimal runnable project to a complete webcam-based demo.
 
+**Python interpreter:** Always run this project with `$HOME/miniforge3/envs/hri/bin/python`. Do not use bare `python` or `python3`.
+
 ---
 
 ## 1. Assignment Requirements That Must Be Explicitly Shown

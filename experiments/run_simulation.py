@@ -1,6 +1,7 @@
 """Simulation demo — development/debug tool only. Not the final project output."""
 import os
 import sys
+import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,10 +11,17 @@ from src.scene.targets import get_targets, HAND_START
 from src.perception.simulated_perception import generate_trajectory
 from src.inference.bayesian_goal_inference import BayesianGoalInference
 from src.prediction.minimum_jerk import estimate_duration, minimum_jerk_trajectory
-from src.visualization.plots import plot_scene_trajectory, plot_posterior_probabilities
+from src.robot.pybullet_robot import PybulletRobot
+from src.server.stream_server import StreamServer, build_composite
+from src.visualization.plots import (
+    plot_scene_trajectory,
+    plot_posterior_probabilities,
+    plot_interception_prediction,
+    render_scene_frame,
+)
 
 # Change to "red", "blue", or "green" to test different targets.
-GROUND_TRUTH = "blue"
+GROUND_TRUTH = "green"
 
 
 def main():
@@ -78,7 +86,7 @@ def main():
 
     if locked:
         print(f"\nLocked target   : {locked.name}  "
-              f"{'✓ correct' if correct else '✗ wrong (expected ' + GROUND_TRUTH + ')'}")
+              f"{'correct' if correct else 'wrong (expected ' + GROUND_TRUTH + ')'}")
         print(f"Lock time       : {inference.lock_time:.2f}s  "
               f"(out of {observations[-1].timestamp:.2f}s total)")
         print(f"Lock confidence : {inference.lock_confidence:.3f}")
@@ -100,6 +108,7 @@ def main():
 
     predicted_trajectory = None
     xf_predicted = None
+    D_remaining = None
 
     if locked is None or lock_obs is None:
         print("No target locked — skipping prediction.")
@@ -140,6 +149,85 @@ def main():
         xf_predicted=xf_predicted,
         lock_time=inference.lock_time,
     )
+
+    # ------------------------------------------------------------------
+    # Stage 6: PyBullet robot arm action
+    # ------------------------------------------------------------------
+    print("\n=== PyBullet Robot Action ===")
+
+    robot = PybulletRobot()
+    robot_frame = robot.render()  # home position render
+
+    if locked is not None:
+        move_duration = D_remaining * config.ROBOT_D_SCALE if D_remaining else 1.0
+        robot.activate(locked.name, move_duration)
+        robot.step_to_end()
+        robot_frame = robot.render()
+        print(f"Robot moved to      : {locked.name} ({locked.label})")
+        print(f"Robot move duration : {move_duration:.3f}s")
+    else:
+        print("No target locked — robot stays at home position.")
+
+    plot_interception_prediction(
+        targets=targets,
+        observations=observations,
+        ground_truth_target=ground_truth_target,
+        predicted_trajectory=predicted_trajectory or [],
+        xf_predicted=xf_predicted,
+        lock_time=inference.lock_time,
+        robot_frame=robot_frame,
+        locked_target=locked,
+        save_path="results/figures/interception_prediction.png",
+    )
+
+    robot.disconnect()
+    print("\nStage 6 complete.")
+
+    # ------------------------------------------------------------------
+    # Stage 6: Flask browser composite
+    # ------------------------------------------------------------------
+    print("\n=== Starting Flask browser preview ===")
+
+    posteriors_final = {t.name: inference.posterior[t.name] for t in targets}
+
+    locked_name = locked.name if locked else "none"
+    lock_conf   = f"{inference.lock_confidence:.3f}" if inference.lock_confidence else "—"
+    d_str       = f"{D_remaining:.2f}s" if D_remaining else "—"
+    status_lines = [
+        f"mode: SIMULATION",
+        f"ground truth: {GROUND_TRUTH}",
+        f"locked: {locked_name}  conf: {lock_conf}",
+        f"D_remaining: {d_str}",
+    ]
+
+    scene_frame = render_scene_frame(
+        targets=targets,
+        observations=observations,
+        ground_truth_target=ground_truth_target,
+        predicted_trajectory=predicted_trajectory,
+        xf_predicted=xf_predicted,
+        lock_time=inference.lock_time,
+        locked_target=locked,
+        status_lines=status_lines,
+    )
+
+    composite = build_composite(
+        scene_frame=scene_frame,
+        robot_frame=robot_frame,
+        posteriors=posteriors_final,
+        targets=targets,
+    )
+
+    server = StreamServer()
+    server.start()
+    server.update_frame(composite)
+
+    print("Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -237,3 +238,177 @@ def plot_posterior_probabilities(history: dict, targets: list, locked_target,
     fig.savefig(save_path, dpi=120)
     plt.close(fig)
     print(f"Posterior probabilities saved → {save_path}")
+
+
+def plot_interception_prediction(
+    targets: list,
+    observations: list,
+    ground_truth_target,
+    predicted_trajectory: list,
+    xf_predicted: np.ndarray,
+    lock_time: float,
+    robot_frame: np.ndarray,
+    locked_target,
+    save_path: str,
+) -> None:
+    """
+    Two-panel figure:
+      Left  — scene with observed trajectory, predicted trajectory, lock point, xf_predicted
+      Right — PyBullet robot arm render at its IK-computed pose
+    """
+    fig, (ax_scene, ax_robot) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # --- Left: scene ---
+    _draw_scene_base(ax_scene, targets)
+
+    xs = [o.position[0] for o in observations]
+    ys = [o.position[1] for o in observations]
+    ax_scene.plot(xs, ys, "-", color=ground_truth_target.color_rgb,
+                  linewidth=2, label="Observed trajectory", zorder=3)
+    ax_scene.plot(xs[::2], ys[::2], ".", color=ground_truth_target.color_rgb,
+                  markersize=5, alpha=0.6, zorder=4)
+    ax_scene.plot(xs[-1], ys[-1], "x", color=ground_truth_target.color_rgb,
+                  markersize=14, markeredgewidth=3,
+                  label=f"Actual endpoint ({ground_truth_target.name})", zorder=6)
+
+    if predicted_trajectory:
+        pxs = [p[0] for p in predicted_trajectory]
+        pys = [p[1] for p in predicted_trajectory]
+        ax_scene.plot(pxs, pys, "--", color="#888888",
+                      linewidth=2, label="Predicted trajectory", zorder=3)
+
+    if xf_predicted is not None:
+        ax_scene.plot(xf_predicted[0], xf_predicted[1], "*",
+                      color="#111111", markersize=18,
+                      label="xf_predicted", zorder=7)
+
+    if lock_time is not None:
+        lock_obs = next((o for o in observations if o.timestamp >= lock_time), None)
+        if lock_obs is not None:
+            ax_scene.plot(lock_obs.position[0], lock_obs.position[1],
+                          "D", color="#FFaa00", markersize=10,
+                          label=f"Lock  (t={lock_time:.2f}s)", zorder=8)
+
+    ax_scene.set_xlim(0, CANVAS_W)
+    ax_scene.set_ylim(0, CANVAS_H)
+    ax_scene.invert_yaxis()
+    ax_scene.set_aspect("equal")
+    ax_scene.set_xlabel("X (pixels)")
+    ax_scene.set_ylabel("Y (pixels)")
+    ax_scene.set_title(f"Scene + Prediction → {ground_truth_target.label}", fontsize=13)
+    ax_scene.legend(loc="lower right", fontsize=9)
+    ax_scene.grid(True, linestyle="--", alpha=0.4)
+
+    # --- Right: PyBullet render ---
+    ax_robot.imshow(robot_frame)
+    ax_robot.axis("off")
+    locked_name = locked_target.label if locked_target else "none"
+    ax_robot.set_title(f"PyBullet Robot Arm — IK target: {locked_name}", fontsize=13)
+    if locked_target is not None:
+        ax_robot.text(
+            0.5, 0.03,
+            f"End effector positioned at → {locked_target.label}",
+            transform=ax_robot.transAxes, ha="center", fontsize=10,
+            color="white",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#222", alpha=0.8),
+        )
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"Interception prediction saved → {save_path}")
+
+
+def render_scene_frame(
+    targets: list,
+    observations: list,
+    ground_truth_target,
+    predicted_trajectory: list = None,
+    xf_predicted: np.ndarray = None,
+    lock_time: float = None,
+    locked_target=None,
+    status_lines: list = None,
+) -> np.ndarray:
+    """
+    Render the simulation scene onto a CANVAS_H × CANVAS_W OpenCV numpy array (RGB).
+    Used to build the browser composite frame.
+    """
+    canvas = np.full((CANVAS_H, CANVAS_W, 3), 30, dtype=np.uint8)
+
+    # Target rectangles
+    for t in targets:
+        x_min, y_min, x_max, y_max = t.region
+        color = (
+            int(t.color_rgb[2] * 255),
+            int(t.color_rgb[1] * 255),
+            int(t.color_rgb[0] * 255),
+        )
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), color, -1)
+        cv2.addWeighted(overlay, 0.25, canvas, 0.75, 0, canvas)
+        cv2.rectangle(canvas, (x_min, y_min), (x_max, y_max), color, 2)
+        cv2.putText(canvas, t.label,
+                    (int(t.position[0]) - 30, y_min - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    # Hand start marker
+    hs = (int(HAND_START[0]), int(HAND_START[1]))
+    cv2.circle(canvas, hs, 8, (80, 80, 80), -1)
+    cv2.putText(canvas, "start", (hs[0] - 16, hs[1] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
+
+    # Observed trajectory
+    gt_color = (
+        int(ground_truth_target.color_rgb[2] * 255),
+        int(ground_truth_target.color_rgb[1] * 255),
+        int(ground_truth_target.color_rgb[0] * 255),
+    )
+    pts = [(int(o.position[0]), int(o.position[1])) for o in observations]
+    for i in range(1, len(pts)):
+        cv2.line(canvas, pts[i - 1], pts[i], gt_color, 2, cv2.LINE_AA)
+
+    # Lock point marker (orange diamond)
+    if lock_time is not None:
+        lock_obs = next((o for o in observations if o.timestamp >= lock_time), None)
+        if lock_obs is not None:
+            lp = (int(lock_obs.position[0]), int(lock_obs.position[1]))
+            size = 8
+            diamond = np.array([
+                [lp[0], lp[1] - size],
+                [lp[0] + size, lp[1]],
+                [lp[0], lp[1] + size],
+                [lp[0] - size, lp[1]],
+            ])
+            cv2.fillPoly(canvas, [diamond], (0, 170, 255))
+            cv2.putText(canvas, f"lock t={lock_time:.2f}s",
+                        (lp[0] + 10, lp[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 170, 255), 1)
+
+    # Predicted trajectory (dashed)
+    if predicted_trajectory and len(predicted_trajectory) > 1:
+        pp = [(int(p[0]), int(p[1])) for p in predicted_trajectory]
+        for i in range(0, len(pp) - 1, 2):
+            cv2.line(canvas, pp[i], pp[min(i + 1, len(pp) - 1)],
+                     (160, 160, 160), 1, cv2.LINE_AA)
+
+    # xf_predicted star (drawn as two overlapping triangles)
+    if xf_predicted is not None:
+        sp = (int(xf_predicted[0]), int(xf_predicted[1]))
+        for angle in range(0, 360, 60):
+            rad = np.radians(angle)
+            outer = (int(sp[0] + 12 * np.cos(rad)), int(sp[1] + 12 * np.sin(rad)))
+            rad2 = np.radians(angle + 30)
+            inner = (int(sp[0] + 5 * np.cos(rad2)), int(sp[1] + 5 * np.sin(rad2)))
+            cv2.line(canvas, inner, outer, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "xf_pred",
+                    (sp[0] + 10, sp[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+
+    # Status text (top-left)
+    lines = status_lines or []
+    for i, line in enumerate(lines):
+        cv2.putText(canvas, line, (8, 20 + i * 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+
+    return canvas
