@@ -7,6 +7,12 @@ from src.scene.targets import Target, HAND_START, CANVAS_W, CANVAS_H
 # Velocity below this (px/s) is treated as stationary — direction likelihood is neutral.
 _MIN_SPEED_PX = 5.0
 
+# Minimum distance the hand must travel from HAND_START before a target lock is allowed.
+# This prevents noise-induced false locks at the very start of motion when
+# velocity estimates are dominated by observation noise (finite-difference noise
+# ≈ noise_std * sqrt(2) / dt, which exceeds the true speed early in the trajectory).
+_MIN_TRAVELED_PX = 15.0
+
 _NORM = np.array([CANVAS_W, CANVAS_H], dtype=float)
 _START_NORM = HAND_START / _NORM
 
@@ -129,10 +135,13 @@ class BayesianGoalInference:
         for t in self.targets:
             self.history[t.name].append(self.posterior[t.name])
 
-        # Lock check
+        # Lock check — require minimum travel from start to avoid noise-induced early locks
         max_name = max(self.posterior, key=self.posterior.get)
         max_prob = self.posterior[max_name]
-        if self.locked_target is None and max_prob > config.CONFIDENCE_THRESHOLD:
+        traveled = float(np.linalg.norm(observation.position - HAND_START))
+        if (self.locked_target is None
+                and max_prob > config.CONFIDENCE_THRESHOLD
+                and traveled >= _MIN_TRAVELED_PX):
             target_map = {t.name: t for t in self.targets}
             self.locked_target = target_map[max_name]
             self.lock_time = observation.timestamp

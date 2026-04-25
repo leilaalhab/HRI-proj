@@ -13,6 +13,7 @@ from src.inference.bayesian_goal_inference import BayesianGoalInference
 from src.prediction.minimum_jerk import estimate_duration, minimum_jerk_trajectory
 from src.robot.pybullet_robot import PybulletRobot
 from src.server.stream_server import StreamServer, build_composite
+from src.evaluation.metrics import TrialLogger, build_trial_result
 from src.visualization.plots import (
     plot_scene_trajectory,
     plot_posterior_probabilities,
@@ -182,6 +183,48 @@ def main():
 
     robot.disconnect()
     print("\nStage 6 complete.")
+
+    # ------------------------------------------------------------------
+    # Stage 7: Trial logging
+    # ------------------------------------------------------------------
+    print("\n=== Trial Logging ===")
+    os.makedirs("results/logs", exist_ok=True)
+
+    D_actual = (
+        (observations[-1].timestamp - inference.lock_time)
+        if inference.lock_time is not None else None
+    )
+    D_adapted = (
+        D_remaining * 1.0  # correction_factor=1.0 (single trial, no prior history)
+        if D_remaining is not None else None
+    )
+
+    trial_result = build_trial_result(
+        trial_id=1,
+        mode="simulation",
+        ground_truth_target=GROUND_TRUTH,
+        predicted_target=locked.name if locked else None,
+        lock_time=inference.lock_time,
+        lock_confidence=inference.lock_confidence,
+        xf_predicted=xf_predicted,
+        xf_actual=observations[-1].position,
+        D_estimated=D_remaining,
+        D_actual=D_actual,
+        D_adapted=D_adapted,
+        num_frames=len(observations),
+        notes="single-trial simulation",
+    )
+
+    logger = TrialLogger()
+    logger.log(trial_result)
+
+    print(f"  target_correct      : {trial_result.target_correct}")
+    print(f"  prediction_error    : {trial_result.prediction_error_norm:.2f} px")
+    if D_actual is not None and D_remaining is not None:
+        print(f"  D_actual            : {D_actual:.3f}s")
+        print(f"  D_estimated         : {D_remaining:.3f}s")
+        print(f"  D_correction (init) : 1.000")
+    print("\nStage 7 complete.")
 
     # ------------------------------------------------------------------
     # Stage 6: Flask browser composite

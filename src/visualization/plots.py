@@ -412,3 +412,160 @@ def render_scene_frame(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
 
     return canvas
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 summary plots
+# ---------------------------------------------------------------------------
+
+def plot_prediction_error(results: list, save_path: str) -> None:
+    """
+    Bar chart of prediction error norm per trial, coloured by target.
+    Twin Y-axis shows D_correction_factor evolution.
+
+    Parameters
+    ----------
+    results : list of TrialResult dataclasses
+    """
+    import math
+
+    _TARGET_COLORS = {"red": "#CC3333", "blue": "#3355CC", "green": "#22AA44"}
+
+    trial_ids   = [r.trial_id for r in results]
+    errors      = [r.prediction_error_norm if not math.isnan(r.prediction_error_norm) else 0.0
+                   for r in results]
+    colors      = [_TARGET_COLORS.get(r.ground_truth_target, "#888888") for r in results]
+    corrections = [r.D_adapted / r.D_estimated
+                   if not math.isnan(r.D_adapted) and not math.isnan(r.D_estimated)
+                   and r.D_estimated > 0 else float("nan")
+                   for r in results]
+
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    ax1.bar(trial_ids, errors, color=colors, alpha=0.8, zorder=2)
+    ax1.set_xlabel("Trial", fontsize=11)
+    ax1.set_ylabel("Prediction Error  ‖xf_pred − xf_actual‖  (px)", fontsize=11)
+    ax1.set_xticks(trial_ids)
+    ax1.grid(True, linestyle="--", alpha=0.4, axis="y")
+
+    ax2 = ax1.twinx()
+    valid = [(tid, c) for tid, c in zip(trial_ids, corrections) if not math.isnan(c)]
+    if valid:
+        vt, vc = zip(*valid)
+        ax2.plot(vt, vc, "o--", color="#FF8800", linewidth=2, markersize=7,
+                 label="D_correction_factor")
+        ax2.set_ylabel("D_correction_factor  (orange)", fontsize=11, color="#FF8800")
+        ax2.tick_params(axis="y", labelcolor="#FF8800")
+        ax2.axhline(y=1.0, color="#FF8800", linestyle=":", alpha=0.4)
+
+    # Legend patches for target colours
+    from matplotlib.patches import Patch
+    legend_els = [Patch(color=c, label=name.capitalize())
+                  for name, c in _TARGET_COLORS.items()]
+    if valid:
+        from matplotlib.lines import Line2D
+        legend_els.append(Line2D([0], [0], color="#FF8800", marker="o",
+                                 linestyle="--", label="D_correction_factor"))
+    ax1.legend(handles=legend_els, loc="upper left", fontsize=9)
+
+    ax1.set_title("Prediction Error per Trial  +  Duration Adaptation", fontsize=13)
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"Prediction error figure saved → {save_path}")
+
+
+def plot_summary_metrics(results: list, save_path: str) -> None:
+    """
+    Three-panel summary figure:
+      Left   — target prediction accuracy (bar per target)
+      Centre — prediction error distribution (histogram)
+      Right  — D_correction_factor trajectory across trials
+    """
+    import math
+
+    _TARGET_COLORS = {"red": "#CC3333", "blue": "#3355CC", "green": "#22AA44"}
+
+    fig, (ax_acc, ax_err, ax_corr) = plt.subplots(1, 3, figsize=(15, 5))
+
+    # --- Accuracy ---
+    targets_seen = sorted({r.ground_truth_target for r in results})
+    acc_data = {t: {"total": 0, "correct": 0} for t in targets_seen}
+    for r in results:
+        acc_data[r.ground_truth_target]["total"] += 1
+        if r.target_correct:
+            acc_data[r.ground_truth_target]["correct"] += 1
+
+    names = list(acc_data)
+    totals  = [acc_data[t]["total"]   for t in names]
+    correct = [acc_data[t]["correct"] for t in names]
+    wrong   = [acc_data[t]["total"] - acc_data[t]["correct"] for t in names]
+    cols    = [_TARGET_COLORS.get(t, "#888888") for t in names]
+    x = range(len(names))
+
+    ax_acc.bar(x, correct, color=cols, alpha=0.85, label="Correct")
+    ax_acc.bar(x, wrong, bottom=correct, color="gray", alpha=0.5, label="Wrong")
+    ax_acc.set_xticks(list(x))
+    ax_acc.set_xticklabels([n.capitalize() for n in names])
+    ax_acc.set_ylabel("Trial count")
+    ax_acc.set_title("Target Accuracy per Class", fontsize=12)
+    ax_acc.legend(fontsize=9)
+    ax_acc.grid(True, axis="y", linestyle="--", alpha=0.4)
+    total_correct = sum(correct)
+    total_all = len(results)
+    ax_acc.set_title(
+        f"Target Accuracy  ({total_correct}/{total_all} = "
+        f"{100*total_correct/total_all:.0f}%)",
+        fontsize=12,
+    )
+
+    # --- Error histogram ---
+    errors = [r.prediction_error_norm for r in results if not math.isnan(r.prediction_error_norm)]
+    if errors:
+        ax_err.hist(errors, bins=max(5, len(errors) // 2), color="#4488CC",
+                    edgecolor="white", alpha=0.85)
+        ax_err.axvline(x=float(np.mean(errors)), color="#FF4444", linestyle="--",
+                       linewidth=2, label=f"Mean = {np.mean(errors):.1f} px")
+        ax_err.legend(fontsize=9)
+    ax_err.set_xlabel("Prediction error (px)")
+    ax_err.set_ylabel("Count")
+    ax_err.set_title("Prediction Error Distribution", fontsize=12)
+    ax_err.grid(True, linestyle="--", alpha=0.4)
+
+    # --- D_correction trajectory ---
+    trial_ids = [r.trial_id for r in results]
+    corrections = []
+    for r in results:
+        if not math.isnan(r.D_adapted) and not math.isnan(r.D_estimated) and r.D_estimated > 0:
+            corrections.append(r.D_adapted / r.D_estimated)
+        else:
+            corrections.append(float("nan"))
+
+    valid_pairs = [(t, c) for t, c in zip(trial_ids, corrections) if not math.isnan(c)]
+    if valid_pairs:
+        vt, vc = zip(*valid_pairs)
+        ax_corr.plot(vt, vc, "o-", color="#FF8800", linewidth=2.5, markersize=8)
+        ax_corr.axhline(y=1.0, color="#888888", linestyle=":", linewidth=1.5,
+                        label="No correction (1.0)")
+        ax_corr.set_xlabel("Trial")
+        ax_corr.set_ylabel("D_correction_factor")
+        ax_corr.set_title("Duration Adaptation Across Trials", fontsize=12)
+        ax_corr.legend(fontsize=9)
+        ax_corr.grid(True, linestyle="--", alpha=0.4)
+        ax_corr.set_xticks(list(vt))
+
+    fig.suptitle(
+        f"Stage 7 Summary — {total_all} trials  |  "
+        f"accuracy {100*total_correct/total_all:.0f}%  |  "
+        f"mean error {np.mean(errors):.1f} px" if errors else "Stage 7 Summary",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"Summary metrics figure saved → {save_path}")
