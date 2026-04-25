@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+import config
 from src.scene.targets import CANVAS_W, CANVAS_H, HAND_START
 
 
@@ -158,3 +159,54 @@ def plot_scene_trajectory(targets: list, observations: list, ground_truth_target
     fig.savefig(save_path, dpi=120)
     plt.close(fig)
     print(f"Trajectory figure saved → {save_path}")
+
+
+def plot_posterior_probabilities(history: dict, targets: list, locked_target,
+                                  lock_time: float, save_path: str) -> None:
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    timestamps = history["timestamps"]
+
+    for target in targets:
+        ax.plot(
+            timestamps, history[target.name],
+            color=target.color_rgb, linewidth=2.5, label=target.label,
+        )
+
+    # Confidence threshold
+    ax.axhline(
+        y=config.CONFIDENCE_THRESHOLD,
+        color="#333333", linestyle="--", linewidth=1.5,
+        label=f"Lock threshold  (P = {config.CONFIDENCE_THRESHOLD})",
+    )
+
+    # Lock event
+    if lock_time is not None and locked_target is not None:
+        ax.axvline(x=lock_time, color="#666666", linestyle=":", linewidth=2)
+        lock_prob = history[locked_target.name][
+            history["timestamps"].index(lock_time)
+        ]
+        ax.annotate(
+            f"TARGET LOCKED\n→ {locked_target.label}\n  t = {lock_time:.2f}s",
+            xy=(lock_time, lock_prob),
+            xytext=(lock_time + 0.12, lock_prob - 0.15),
+            fontsize=9,
+            color="#333333",
+            arrowprops=dict(arrowstyle="->", color="#555555"),
+        )
+
+    ax.set_xlabel("Time (s)", fontsize=11)
+    ax.set_ylabel("Posterior  P(G | observations)", fontsize=11)
+    ax.set_title(
+        "Bayesian Goal Inference — Posterior Probabilities Over Time", fontsize=13
+    )
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(left=0)
+    ax.legend(fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    print(f"Posterior probabilities saved → {save_path}")
