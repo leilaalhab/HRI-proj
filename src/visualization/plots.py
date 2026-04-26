@@ -556,10 +556,12 @@ def plot_summary_metrics(results: list, save_path: str) -> None:
         ax_corr.grid(True, linestyle="--", alpha=0.4)
         ax_corr.set_xticks(list(vt))
 
+    mode = results[0].mode if results else "simulation"
+    stage_label = "Stage 9 — Webcam" if mode == "webcam" else "Stage 7 — Simulation"
+    mean_err_str = f"mean error {np.mean(errors):.1f} px" if errors else "no error data"
     fig.suptitle(
-        f"Stage 7 Summary — {total_all} trials  |  "
-        f"accuracy {100*total_correct/total_all:.0f}%  |  "
-        f"mean error {np.mean(errors):.1f} px" if errors else "Stage 7 Summary",
+        f"{stage_label}  |  {total_all} trials  |  "
+        f"accuracy {100*total_correct/total_all:.0f}%  |  {mean_err_str}",
         fontsize=14,
         fontweight="bold",
     )

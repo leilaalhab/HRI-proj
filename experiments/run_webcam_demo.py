@@ -1,5 +1,9 @@
 """
-Live webcam HRI demo — Stage 8 (the final real-time perception demo).
+Live webcam HRI demo — Stage 8 / 9.
+
+Runs a guided 9-trial plan (3 per target, interleaved). The overlay
+shows which target the user should reach next; ground truth is therefore
+known automatically and accuracy can be computed.
 
 Four threads
 ------------
@@ -8,14 +12,14 @@ Four threads
   pybullet   : Robot arm stepping + rendering → shared state
   composite  : Builds browser frame from shared state → Flask MJPEG buffer
 
-Flask runs as a fifth daemon thread (started by serve()).
+Flask runs as a fifth daemon thread.
 Open http://localhost:5000 in your browser after launch.
 
 Controls (browser buttons or terminal commands + Enter)
 -------------------------------------------------------
-  r / Reset      — start a new trial, log the completed one
+  r / Reset      — complete current trial and advance to next
   s / Screenshot — save the composite frame to results/screenshots/
-  q / Quit       — clean shutdown
+  q / Quit       — clean shutdown + print summary if plan is complete
 """
 
 import os
@@ -37,6 +41,15 @@ from src.prediction.minimum_jerk import estimate_duration, minimum_jerk_trajecto
 from src.robot.pybullet_robot import PybulletRobot
 from src.server.stream_server import build_composite, SharedState, _encode_jpeg
 from src.evaluation.metrics import DurationAdapter, TrialLogger, build_trial_result
+from src.visualization.plots import plot_prediction_error, plot_summary_metrics
+
+# 9-trial guided plan — 3 per target, interleaved so the arm sweeps to
+# different world positions each trial (better for the demo video).
+TRIAL_PLAN = [
+    "red", "blue", "green",
+    "blue", "green", "red",
+    "green", "red", "blue",
+]
 
 _STATIC_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static"
@@ -90,6 +103,12 @@ class DemoState:
         self.prediction_error_norm: float | None = None
         self.num_obs_this_trial: int = 0
 
+        # Guided trial plan (Stage 9)
+        self.trial_plan:    list[str] = TRIAL_PLAN
+        self.plan_idx:      int = 0                # which trial in plan we're on
+        self.plan_complete: bool = False
+        self.all_results:   list = []              # TrialResult objects, one per trial
+
         # Control flags
         self.quit_flag:       bool = False
         self.save_flag:       bool = False
@@ -133,7 +152,7 @@ def _draw_overlays(
     cv2.putText(out, "START", (hs[0] - 22, hs[1] + 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 90), 1)
 
-    # Hand position circle
+    # Read all shared state in one lock acquisition
     with state.lock:
         hand_pos      = state.hand_pos
         locked_target = state.locked_target
@@ -144,6 +163,28 @@ def _draw_overlays(
         D_rem         = state.D_remaining
         err_norm      = state.prediction_error_norm
         rob_state     = state.robot_state_str
+        plan_idx      = state.plan_idx
+        trial_plan    = state.trial_plan
+        plan_complete = state.plan_complete
+
+    # Guided trial instruction banner (top-centre)
+    if trial_plan:
+        if not plan_complete and plan_idx < len(trial_plan):
+            tname = trial_plan[plan_idx]
+            tobj  = next(t for t in state.targets if t.name == tname)
+            txt   = f"Trial {plan_idx + 1}/{len(trial_plan)}   REACH FOR: {tobj.label.upper()}"
+            (tw, _), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+            cx = CANVAS_W // 2
+            cv2.rectangle(out, (cx - tw // 2 - 10, 6), (cx + tw // 2 + 10, 38), (25, 25, 25), -1)
+            cv2.putText(out, txt, (cx - tw // 2, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, tobj.color_bgr, 2, cv2.LINE_AA)
+        else:
+            txt   = "PLAN COMPLETE  |  press q to quit"
+            (tw, _), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+            cx = CANVAS_W // 2
+            cv2.rectangle(out, (cx - tw // 2 - 10, 6), (cx + tw // 2 + 10, 38), (20, 60, 20), -1)
+            cv2.putText(out, txt, (cx - tw // 2, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (100, 255, 100), 2, cv2.LINE_AA)
 
     if hand_pos is not None:
         hp = (int(hand_pos[0]), int(hand_pos[1]))
@@ -402,9 +443,10 @@ def stdin_thread_fn(state: DemoState, logger: TrialLogger, adapter: DurationAdap
 # ---------------------------------------------------------------------------
 
 def _do_reset(state: DemoState, logger: TrialLogger, adapter: DurationAdapter):
-    """Log the completed trial, adapt, then signal all threads to reset."""
+    """Log the completed trial, adapt D correction, advance plan, signal reset."""
     with state.lock:
-        gt         = None          # no ground truth in webcam mode (user selects)
+        plan_idx   = state.plan_idx
+        trial_plan = state.trial_plan
         predicted  = state.locked_target.name if state.locked_target else None
         lock_time  = state.lock_time
         lock_conf  = state.lock_confidence
@@ -418,11 +460,15 @@ def _do_reset(state: DemoState, logger: TrialLogger, adapter: DurationAdapter):
         n_frames   = state.num_obs_this_trial
         trial_id   = state.trial_id
 
+    # Ground truth: from the guided plan when available, else fall back to prediction
+    gt = trial_plan[plan_idx] if trial_plan and plan_idx < len(trial_plan) else (predicted or "unknown")
+    plan_label = f"{plan_idx + 1}/{len(trial_plan)}" if trial_plan else "--"
+
     if xf_act is not None:
         result = build_trial_result(
             trial_id=trial_id,
             mode="webcam",
-            ground_truth_target=predicted or "unknown",
+            ground_truth_target=gt,
             predicted_target=predicted,
             lock_time=lock_time,
             lock_confidence=lock_conf,
@@ -432,18 +478,84 @@ def _do_reset(state: DemoState, logger: TrialLogger, adapter: DurationAdapter):
             D_actual=D_act,
             D_adapted=D_ada,
             num_frames=n_frames,
-            notes="webcam trial",
+            notes=f"webcam guided {plan_label}",
         )
         logger.log(result)
         if D_est and D_act:
             adapter.adapt(D_est, D_act)
-        print(f"  Trial {trial_id} logged | locked={predicted} | "
+
+        correct_str = "ok" if result.target_correct else "WRONG"
+        print(f"  [{plan_label}] gt={gt:5s}  locked={str(predicted):5s}  {correct_str:5s} | "
               f"err={result.prediction_error_norm:.1f}px | "
               f"D_corr={adapter.correction_factor:.3f}")
 
+        with state.lock:
+            state.all_results.append(result)
+
+    # Advance plan index; mark complete when all trials done
+    plan_just_finished = False
     with state.lock:
-        state.trial_id  += 1
+        if trial_plan and state.plan_idx < len(trial_plan):
+            state.plan_idx += 1
+            if state.plan_idx >= len(trial_plan):
+                state.plan_complete = True
+                plan_just_finished = True
+        state.trial_id    += 1
         state.reset_count += 1
+
+    if plan_just_finished:
+        _finish_plan(state, adapter)
+
+
+# ---------------------------------------------------------------------------
+# Plan completion summary
+# ---------------------------------------------------------------------------
+
+def _finish_plan(state: DemoState, adapter: DurationAdapter):
+    """Print summary table and save figures once all plan trials are done."""
+    with state.lock:
+        results = list(state.all_results)
+
+    n_total   = len(results)
+    n_correct = sum(r.target_correct for r in results)
+    errors    = [r.prediction_error_norm for r in results
+                 if r.prediction_error_norm == r.prediction_error_norm]
+    lock_times = [r.lock_time for r in results
+                  if r.lock_time is not None and r.lock_time == r.lock_time]
+
+    print()
+    print("=" * 52)
+    print(f"  Stage 9 Summary — {n_total} webcam trials")
+    print("=" * 52)
+    print(f"  Accuracy    : {n_correct}/{n_total}  ({100 * n_correct / n_total:.0f}%)")
+    if errors:
+        print(f"  Mean error  : {np.mean(errors):.1f} px  (std={np.std(errors):.1f})")
+    if lock_times:
+        print(f"  Mean lock   : {np.mean(lock_times):.2f} s")
+    print(f"  D_correct   : {adapter.correction_factor:.3f}")
+    print("=" * 52)
+
+    # Per-trial breakdown
+    print()
+    print(f"  {'#':>2}  {'gt':>5}  {'pred':>5}  {'ok':>5}  {'lock_t':>7}  {'err_px':>7}")
+    print("  " + "-" * 42)
+    for r in results:
+        ok_str = "ok" if r.target_correct else "WRONG"
+        lt_str = f"{r.lock_time:.2f}s" if r.lock_time == r.lock_time else "  --  "
+        ep_str = f"{r.prediction_error_norm:.1f}" if r.prediction_error_norm == r.prediction_error_norm else " --"
+        print(f"  {r.trial_id:>2}  {r.ground_truth_target:>5}  {str(r.predicted_target):>5}  "
+              f"{ok_str:>5}  {lt_str:>7}  {ep_str:>7}")
+
+    print()
+    os.makedirs("results/figures", exist_ok=True)
+    plot_prediction_error(results, save_path="results/figures/prediction_error_webcam.png")
+    plot_summary_metrics(results,  save_path="results/figures/summary_metrics_webcam.png")
+    print("  Figures → results/figures/prediction_error_webcam.png")
+    print("            results/figures/summary_metrics_webcam.png")
+    print("  Press q (or browser Quit) to exit.\n")
+
+    # Auto-save a final screenshot
+    state.request_save()
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +631,10 @@ def main():
         daemon=True, name="flask",
     )
     flask_thread.start()
-    print(f"\n  HRI Webcam Demo")
-    print(f"  → Open http://localhost:{config.FLASK_PORT} in your browser\n")
+    print(f"\n  HRI Webcam Demo — Stage 9 Guided Trials")
+    print(f"  → Open http://localhost:{config.FLASK_PORT} in your browser")
+    print(f"  Plan: {' → '.join(TRIAL_PLAN)}")
+    print(f"  Press r (Reset) after each trial to advance to the next target.\n")
 
     # Worker threads
     threads = [
