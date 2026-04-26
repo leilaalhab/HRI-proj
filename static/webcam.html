@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>HRI Live Demo</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #111;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: 'Courier New', monospace;
+            color: #ccc;
+            padding: 1rem;
+            gap: 0.75rem;
+        }
+        h1 {
+            font-size: 0.9rem;
+            letter-spacing: 0.06em;
+            color: #aaa;
+            text-align: center;
+        }
+        img {
+            display: block;
+            max-width: 100%;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+        .controls {
+            display: flex;
+            gap: 0.75rem;
+        }
+        button {
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            padding: 0.4rem 1.1rem;
+            border: 1px solid #444;
+            border-radius: 3px;
+            cursor: pointer;
+            background: #1e1e1e;
+            color: #ccc;
+            letter-spacing: 0.04em;
+            transition: background 0.15s;
+        }
+        button:hover { background: #2e2e2e; }
+        #btn-reset { border-color: #44aa66; color: #44aa66; }
+        #btn-save  { border-color: #6688cc; color: #6688cc; }
+        #btn-quit  { border-color: #cc4444; color: #cc4444; }
+        #status-msg {
+            font-size: 0.7rem;
+            color: #555;
+            height: 1rem;
+            letter-spacing: 0.04em;
+        }
+        p.hint {
+            font-size: 0.65rem;
+            color: #444;
+            letter-spacing: 0.04em;
+        }
+    </style>
+</head>
+<body>
+    <h1>Real-Time Human Intent Recognition — Proactive Robot Handover</h1>
+    <img src="/video_feed" alt="HRI Live Feed">
+
+    <div class="controls">
+        <button id="btn-reset" onclick="cmd('reset')">&#x21BA; Reset trial</button>
+        <button id="btn-save"  onclick="cmd('save')">&#x1F4BE; Screenshot</button>
+        <button id="btn-quit"  onclick="cmd('quit')">&#x25A0; Quit</button>
+    </div>
+    <div id="status-msg"></div>
+    <p class="hint">Perception &rarr; Bayesian Inference &rarr; Target Lock (P&gt;0.8) &rarr; Robot Action &rarr; Feedback</p>
+
+    <script>
+        function cmd(action) {
+            fetch('/' + action, {method: 'POST'})
+                .then(r => r.json())
+                .then(d => {
+                    const el = document.getElementById('status-msg');
+                    el.textContent = d.status || '';
+                    setTimeout(() => { el.textContent = ''; }, 2000);
+                })
+                .catch(() => {});
+        }
+    </script>
+</body>
+</html>
